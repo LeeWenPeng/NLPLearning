@@ -1,0 +1,43 @@
+- name: ACL Anthology
+  url: https://www.aclweb.org/anthology/
+  src: paper
+
+- name: Semantic Scholar
+  url: https://www.semanticscholar.org/
+  src: paper
+
+- name: dblp
+  url: https://dblp.uni-trier.de/
+  src: paper
+
+- name: Paper Weekly
+  url: http://www.paperweekly.site/
+  src: other
+
+- name: 科学空间
+  url: https://kexue.fm/
+  src: other
+
+- name: Machine Learning Mastery
+  url: https://machinelearningmastery.com/blog/
+  src: other
+
+- name: 简单粗暴 TensorFlow 2
+  url: https://tf.wiki/zh_hans/
+  src: learn
+
+- name: Keras 深度学习库
+  url: https://keras-zh.readthedocs.io/
+  src: learn
+
+- name: 慕课网
+  url: https://www.imooc.com/
+  src: learn
+
+- name: 极客学院
+  url: https://wiki.jikexueyuan.com/
+  src: learn
+
+- name: labuladong 的算法小抄
+  url: https://labuladong.gitbook.io/algo/
+  src: learn
