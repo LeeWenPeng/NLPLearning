@@ -13,7 +13,7 @@
 
 ![image-20230706025130490](Temporal Information Extraction for Question Answering Using  Syntactic Dependencies in an LSTM-based Architecture/img/image-20230706025130490.png)
 
-任务一：识别文本中的时间表达式和事件
+### 任务一：识别文本中的时间表达式和事件
 
 ![image-20230706030053618](Temporal Information Extraction for Question Answering Using  Syntactic Dependencies in an LSTM-based Architecture/img/image-20230706030053618.png)
 
@@ -44,7 +44,7 @@
      >   Rodrigo Agerri, Josu Bermudez, and German Rigau.2014.Ixa pipeline: Efficient and ready to use multilingual nlp tools. In Proc. of the 9th Language Resources and Evaluation Conference (LREC2014),
      >   pages 26–31
 
-任务二：时序关系分类器
+### 任务二：时序关系分类器
 
 由四部分组成：**基于lstm的句子内实体关系模型**，基于lstm的跨句子关系模型，另一个**基于lstm的文档创建时间关系模型**，以及**用于TIMEX对的基于规则的组件**。
 
@@ -52,7 +52,39 @@
 
 基于LSTM的三个组件使用**相同流线结构**，通过**实体对之间的最短依赖路径**实现恢复标记排序
 
+#### 1 句子内实体关系模型
 
+使用依赖树中实体之间的最短路径来捕获基本上下文。
+
+1.   使用NewsReader管道，我们确定最短路径，并使用路径中所有令牌的单词嵌入作为神经网络的输入。
+
+2.   使用了两个分支接收词嵌入序列
+
++   左分支处理从源实体到最小共同祖先的路径。
++   右分支处理从目标实体到最小共同祖先的路径。
+
+![image-20230706161807310](Temporal Information Extraction for Question Answering Using  Syntactic Dependencies in an LSTM-based Architecture/img/image-20230706161807310.png)
+
+>   Yan Xu, Lili Mou, Ge Li, Yunchuan Chen, Hao Peng, and Zhi Jin. 2015. Classifying relations via long short term memory networks along shortest dependency paths. In Proc. ofEMNLP 2015, pages 1785–1794.Association for Computational Linguistics.
+
+3.   每个分支都经过一个最大池化层
+4.   连接
+5.   经过一个隐藏层
+6.   softmax产生类的概率分布
+
+>   通过翻转每一个事件对来增加训练数据
+
+#### 2 跨句子实体分类模型
+
+目的：通过文档，找到更多实体之间的存在的时序关系
+
+模型与句子间实体分类模型相似
+
+由于不同句子中的实体之间没有共同的根，所以我们使用实体和句子根之间的路径来构造输入数据。
+
+#### 3 文档创建时间模型
+
+#### 4 时间序列关系
 
 ## 4 取得了什么成果
 
@@ -66,3 +98,5 @@
 2.   三种类型的未注释文件:10篇2014年的新闻文章、10篇关于世界历史的维基百科文章和8篇2000年代初的博客文章。
 
 ### 2 TimeBank-Dense
+
+<[muk343/TimeBank-dense: The Timebank dense data in .tml format (github.com)](https://github.com/muk343/TimeBank-dense)>
