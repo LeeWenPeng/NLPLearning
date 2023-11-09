@@ -173,7 +173,7 @@ def get_params(vocab_size, num_hiddens, device):
 ```python
 def init_rnn_state(batch_size, num_hidden, device):
     """
-    设置 rnn 的
+    设置 rnn 的第一个 state
     :param batch_size: 批量大小
     :param num_hidden: 隐藏单元数
     :param device:
@@ -254,7 +254,7 @@ class RNNModelScratch:  # @save
         return self.init_state(batch_size, self.num_hiddens, device)
 ```
 
-5 设置模型
+#### 5 设置模型
 
 ```python
 num_hiddens = 512
@@ -278,7 +278,321 @@ Y, new_state = net(X.to(d2l.try_gpu()), state)
 
 
 
-#### 完整代码
+#### 6 预测部分
+
+```c++
+"""预测"""
+
+
+def predict_ch8(prefix, num_preds, net, vocab, device):
+    """
+    进行预测的函数
+    :param prefix: 需要预测的字符串
+    :param num_preds: 要预测步长，要预测多少步
+    :param net: 神经网络
+    :param vocab: 词汇表
+    :param device:
+    :return: 预测到字符串
+    """
+    # 初始状态 H_o shape (batch_size, num_hiddens)
+    state = net.begin_state(batch_size=1, device=device)
+    # print(state[0].shape) torch.Size([1, 512])
+    # vocab[prefix[0]]，也就是 vocab[c] 调用 vocab 类中的 __getitem__() 方法，将字符转换成其在 vocab 中对应的索引
+    outputs = [vocab[prefix[0]]]  # 将 prefix 第 0 位加入 outputs
+    # print(''.join([vocab.idx_to_token[i] for i in outputs])) # t
+    # 匿名函数 获取 outputs 列表中的最后一位
+    get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
+    # 预热部分，将 prefix 挨个投入到 net 中做计算，并将每一位加入到 outputs 中
+    for y in prefix[1:]:
+        _, state = net(get_input(), state)
+        outputs.append(vocab[y])
+    # print(''.join([vocab.idx_to_token[i] for i in outputs])) # time traveller
+    # 预测部分，进行 num_preds 步预测
+    # 每次获得输出张量中最大值的索引，然后将该索引加入到 outputs 中作为预测结果
+    for _ in range(num_preds):
+        y, state = net(get_input(), state)
+        # y.argmax(dim=1) 获得张量中最大值的索引
+        # dim=1 就是按第 1 维度进行，就是取列中最大值
+        # print(y.shape) # torch.Size([1, 28])
+        outputs.append(int(y.argmax(dim=1).reshape(1)))
+    return ''.join([vocab.idx_to_token[i] for i in outputs])
+
+
+a = predict_ch8('time traveller', 10, net, vocab, d2l.try_gpu())
+```
+
+
+
+#### 7 梯度裁剪
+
+```c++
+def grad_clipping(net, theta):
+    """
+    梯度裁剪
+
+    问题：当时间步长 T 较大时，导致数值不稳定，例如导致梯度爆炸或梯度消失。
+    目标：保证模型的稳定性
+    基本思路：保证梯度每次下降的量在一个安全范围内，比如确定一个范围，当梯度的值超出这个梯度时，则通过某些方式，将其折叠到这个安全范围内
+    具体方法：
+    1. 直接裁剪：当梯度大于阈值时，将梯度裁剪到最大阈值，当梯度小于阈值时，将梯度裁剪到最小阈值
+    2. 比例减少：通过将梯度单位向量乘以阈值来裁剪梯度
+    3. 结合上述两种方式，g <- min(1, theta / ||g||) * g，当梯度在阈值范围内时，就直接使用阈值，如果梯度大于阈值，则将梯度裁剪为阈值乘以梯度方向上的单位向量
+    :param net: 网络
+    :param theta: 阈值
+    :return: void
+    """
+    # isinstance 判断是一个对象是否是一个已知对象
+    # 下面的选择结构是得到参数
+    if isinstance(net, nn.Module):
+        params = [p for p in net.parameters() if p.requires_grad]
+    else:
+        params = net.params
+    # 求 |p|，是将所有的梯度元素拼接成一个向量
+    norm = torch.sqrt(sum(torch.sum((p.grad ** 2)) for p in params))
+    # theta 就是阈值，如果梯度大于阈值，就对梯度进行裁剪
+    if norm > theta:
+        for param in params:
+            # p = p * theta / |p| 梯度裁剪
+            param.grad[:] *= theta / norm
+```
+
+
+
+#### 8 训练部分
+
+##### 1 一次训练
+
+```python
+def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
+    """
+    训练网络一个迭代周期
+
+    过程：
+    1. 对隐状态的处理
+        1. 对于顺序采样初始隐状态和随机抽样每个 epoch 的初始隐状态的初始化
+        2. 对于其他隐状态，进行 detach_() 操作，就是将这个隐状态从原本其所在的计算图中剥离出来
+    2. 获取训练数据 X 和标签 Y
+    3. 对 X 计算预测值 y_hat 和隐状态 state
+    4. 使用 y 和 y_hat 计算损失函数 loss
+    5. 更新参数，优化模型：
+        1. 优化器初始化
+        2. 对损失函数计算梯度
+        3. 梯度裁剪
+        4. 根据梯度更新参数
+
+    :param net: 神经网络
+    :param train_iter: 训练迭代器，训练数据也在 train_iter
+    :param loss: 损失函数
+    :param updater: 优化函数
+    :param device: 设备
+    :param use_random_iter: 是否使用随机采样的标志
+    :return:
+    """
+    state, timer = None, d2l.Timer()
+
+    # class Accumulator:
+    #     """For accumulating sums over `n` variables."""
+    #     def __init__(self, n):
+    #         """Defined in :numref:`sec_softmax_scratch`"""
+    #         self.data = [0.0] * n
+    #
+    #     def add(self, *args):
+    #         self.data = [a + float(b) for a, b in zip(self.data, args)]
+    #
+    #     def reset(self):
+    #         self.data = [0.0] * len(self.data)
+    #
+    #     def __getitem__(self, idx):
+    #         return self.data[idx]
+    metric = d2l.Accumulator(2)  # 用来保存训练损失之和，词元数量的数据结构
+    for X, Y in train_iter:
+        # 对于相邻采样的第一个样本，或者是随机抽样的每次分区，都需要初始化隐藏状态
+        if state is None or use_random_iter:
+            state = net.begin_state(batch_size=X.shape[0], device=device)
+        else:
+            # 将 state 从计算图中剥离出，设置成叶子tensor
+            if isinstance(net, nn.Module) and not isinstance(state, tuple):
+                state.detach_()
+            else:
+                for s in state:
+                    s.detach_()
+        y = Y.T.reshape(-1)
+        # 将 X, y 投指定计算资源
+        X, y = X.to(device), y.to(device)
+        y_hat, state = net(X, state)
+        l = loss(y_hat, y.long()).mean()
+        # 参数更新 训练
+        # 判断 updater 使用的是模块内置的更新器还是自己写的
+        if isinstance(updater, torch.optim.Optimizer):
+            updater.zero_grad()
+            l.backward()
+            grad_clipping(net, 1)
+            updater.step()
+        else:
+            l.backward()
+            grad_clipping(net, 1)
+            updater(batch_size=1)
+        # 因为前面的 loss，取了均值，也就是 l = loss(y_hat, y.long()).mean()，所以这里再将 l * y.numel()
+        # list.numel() 返回数组中元素的个数
+        metric.add(l * y.numel(), y.numel())
+    return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
+```
+
+
+
+##### 2 训练
+
+```python
+def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=False):
+    """
+    训练模型
+    :param net: 神经网络
+    :param train_iter: 训练数据
+    :param vocab: 词汇表
+    :param lr: 学习率
+    :param num_epochs: 周期
+    :param device: 计算资源
+    :param use_random_iter: 采样方式标志
+    :return:
+    """
+    loss = nn.CrossEntropyLoss()
+    # 绘制图形
+    animator = MyPlotMethod(xlabel='epoch', ylabel='perplexity', legend=['train'], xlim=[10, num_epochs])
+    # animator = d2l.Animator(xlabel='epoch', ylabel='perplexity', legend=['train'], xlim=[10, num_epochs])
+    # 初始化
+    if isinstance(net, nn.Module):
+        updater = torch.optim.SGD(net.parameters(), lr)
+    else:
+        updater = lambda batch_size: d2l.sgd(net.params, lr, batch_size)
+    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
+
+    # 训练和预测
+    for epoch in range(num_epochs):
+        ppl, speed = train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter)
+        if (epoch + 1) % 10 == 0:
+            print(predict('time traveller'))
+            animator.add(epoch + 1, [ppl])
+    print(f'困惑度 {ppl:.1f}, {speed:.1f} 词元/秒 {str(device)}')
+    print(predict('time traveller'))
+    print(predict('traveller'))
+    plt.show()
+```
+
+
+
+##### 3 训练部分完整代码
+
+```python
+"""
+训练部分
+
+定义函数在一个迭代周期内训练模型
+
+针对于不同的采样方式，采取不同的隐藏状态初始化方法
+1. 针对于顺序抽样：
+    1. 当前小批量数据最后一个样本的隐藏状态，将用于初始化下一个小批量数据第一个样本的隐藏状态。
+    2. 将每一个隐藏状态的计算都限制在每一个小批量样本中——为了降低计算量
+2. 针对于随机抽样：
+    对每一个周期重新初始化隐藏状态。
+"""
+
+
+def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
+    """
+    训练网络一个迭代周期
+
+    过程：
+    1. 对隐状态的处理
+        1. 对于顺序采样初始隐状态和随机抽样每个 epoch 的初始隐状态的初始化
+        2. 对于其他隐状态，进行 detach_() 操作，就是将这个隐状态从原本其所在的计算图中剥离出来
+    2. 获取训练数据 X 和标签 Y
+    3. 对 X 计算预测值 y_hat 和隐状态 state
+    4. 使用 y 和 y_hat 计算损失函数 loss
+    5. 更新参数，优化模型：
+        1. 优化器初始化
+        2. 对损失函数计算梯度
+        3. 梯度裁剪
+        4. 根据梯度更新参数
+
+    :param net: 神经网络
+    :param train_iter: 训练迭代器，训练数据也在 train_iter
+    :param loss: 损失函数
+    :param updater: 优化函数
+    :param device: 设备
+    :param use_random_iter: 是否使用随机采样的标志
+    :return:
+    """
+    state, timer = None, d2l.Timer()
+
+    metric = d2l.Accumulator(2)  # 用来保存训练损失之和，词元数量的数据结构
+    for X, Y in train_iter:
+        # 对于相邻采样的第一个样本，或者是随机抽样的每次分区，都需要初始化隐藏状态
+        if state is None or use_random_iter:
+            state = net.begin_state(batch_size=X.shape[0], device=device)
+        else:
+            # 将 state 从计算图中剥离出，设置成叶子tensor
+            if isinstance(net, nn.Module) and not isinstance(state, tuple):
+                state.detach_()
+            else:
+                for s in state:
+                    s.detach_()
+        y = Y.T.reshape(-1)
+        # 将 X, y 投指定计算资源
+        X, y = X.to(device), y.to(device)
+        y_hat, state = net(X, state)
+        l = loss(y_hat, y.long()).mean()
+        # 参数更新 训练
+        # 判断 updater 使用的是模块内置的更新器还是自己写的
+        if isinstance(updater, torch.optim.Optimizer):
+            updater.zero_grad()
+            l.backward()
+            grad_clipping(net, 1)
+            updater.step()
+        else:
+            l.backward()
+            grad_clipping(net, 1)
+            updater(batch_size=1)
+        # 因为前面的 loss，取了均值，也就是 l = loss(y_hat, y.long()).mean()，所以这里再将 l * y.numel()
+        # list.numel() 返回数组中元素的个数
+        metric.add(l * y.numel(), y.numel())
+    return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
+
+def train_ch8(net, train_iter, vocab, lr, num_epochs, device, use_random_iter=False):
+    """
+    训练模型
+    :param net: 神经网络
+    :param train_iter: 训练数据
+    :param vocab: 词汇表
+    :param lr: 学习率
+    :param num_epochs: 周期
+    :param device: 计算资源
+    :param use_random_iter: 采样方式标志
+    :return:
+    """
+    loss = nn.CrossEntropyLoss()
+    # 绘制图形
+    animator = MyPlotMethod(xlabel='epoch', ylabel='perplexity', legend=['train'], xlim=[10, num_epochs])
+    # animator = d2l.Animator(xlabel='epoch', ylabel='perplexity', legend=['train'], xlim=[10, num_epochs])
+    # 初始化
+    if isinstance(net, nn.Module):
+        updater = torch.optim.SGD(net.parameters(), lr)
+    else:
+        updater = lambda batch_size: d2l.sgd(net.params, lr, batch_size)
+    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
+
+    # 训练和预测
+    for epoch in range(num_epochs):
+        ppl, speed = train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter)
+        if (epoch + 1) % 10 == 0:
+            print(predict('time traveller'))
+            animator.add(epoch + 1, [ppl])
+    print(f'困惑度 {ppl:.1f}, {speed:.1f} 词元/秒 {str(device)}')
+    print(predict('time traveller'))
+    print(predict('traveller'))
+    plt.show()
+```
+
+## 2 完整代码
 
 ```python
 import math
@@ -707,10 +1021,169 @@ train_ch8(net, train_iter, vocab, lr, num_epochs, d2l.try_gpu(), use_random_iter
 
 ```
 
-## 2 简洁实现
+## 3 简洁实现
 
 代码
 
 ```python
+import torch
+from torch import nn
+from torch.nn import functional as F
+from d2l import  torch as d2l
+
+batch_size, num_steps = 32, 35 # 定义超参数
+train_iter, vocab = d2l.load_data_time_machine(batch_size, num_steps) # 获取数据
+
+"""
+1 定义模型
+"""
+num_hiddens = 256
+rnn_layer = nn.RNN(len(vocab), num_hiddens)
+
+"""
+RNN 模块的简单使用：构造一个含有单隐藏层、隐藏层单元数为 256 的 RNN
+"""
+# 初始化隐藏状态 shape [隐藏层个数， 批量大小， 隐藏单元数]
+state = torch.zeros((1, batch_size, num_hiddens))
+# print(state.shape) # torch.Size([1, 32, 256])
+
+# X shape ((num_steps, batch_size, vocab_size)
+X = torch.rand(size=(num_steps, batch_size, len(vocab))) # 生成 X
+# print(X.shape) # torch.Size([35, 32, 28])
+
+# Y shape (num_steps, batch_size, num_hiddens)
+Y, state_new = rnn_layer(X, state)
+# print(Y.shape) # torch.Size([35, 32, 256])
+# print(state_new.shape) # torch.Size([1, 32, 256])
+
+class RNNModel(nn.Module):
+    """
+    RNN模型类
+    """
+    def __init__(self, rnn_layer, vocab_size, **kwargs):
+        super(RNNModel, self).__init__(**kwargs)
+        self.rnn = rnn_layer
+        self.vocab_size = vocab_size
+        self.num_hiddens = self.rnn.hidden_size
+        if not self.rnn.bidirectional:
+            self.num_directions = 1
+            self.linear = nn.Linear(self.num_hiddens, self.vocab_size)
+        else:
+            self.num_directions = 2
+            self.linear = nn.Linear(self.num_hiddens * 2, self.vocab_size)
+
+    def forward(self, inputs, state):
+        """前向计算"""
+        X = F.one_hot(inputs.T.long(), self.vocab_size) # 将 X 转换为 one_hot
+        X = X.to(torch.float32)
+        Y, state = self.rnn(X, state)
+        output = self.linear(Y.reshape((-1, Y.shape[-1])))
+        return output, state
+
+    def begin_state(self, device, batch_size=1):
+        if not isinstance(self.rnn, nn.LSTM):
+            return torch.zeros((self.num_directions * self.rnn.num_layers, batch_size, self.num_hiddens), device=device)
+        else:
+            return (
+                torch.zeros((self.num_directions * self.rnn.num_layers, batch_size, self.num_hiddens), device=device),
+                torch.zeros((self.num_directions * self.rnn.num_layers, batch_size, self.num_hiddens), device=device)
+            )
+
+"""
+训练
+"""
+device = d2l.try_gpu()
+net = RNNModel(rnn_layer, vocab_size=len(vocab))
+net = net.to(device)
+# d2l.predict_ch8('time traveller', 10, net, vocab, device)
+num_epochs, lr=500, 1
+# d2l.train_ch8(net, train_iter, vocab, lr, num_epochs, device)
+
+"""
+总结：使用RNN，需要定义RNN模型
+RNN 模型的单元包括：初始化、前向算法、初始状态
+初始化的作用是传入参数，包括：rnn 的模型、字典、输出层函数
+前向算法就是模型的运行算法，过程是：调用 RNN 模型计算每一层的输出 Y 和隐状态 state
+    其中，输出 Y 需要经过输出层函数转换成真正的输出 output，所以可以将 Y 排出计算图
+    而隐状态 state 是为了辅助 RNN 模型的下一层计算
+初始状态的作用是获得第一个隐状态，可以使用形状为隐状态需要的形状的 0 tensor
+    隐状态形状如下表
+
+形状：
+    输入形状：时间步长、批量大小、输入个数(one_hot 的向量长度，也就是词汇表的大小 len(vocab))
+    输出形状：时间步长、批量大小、隐藏单元个数
+    隐藏层形状：时间步长、输入个数、隐藏单元个数
+"""
 ```
 
+## 3 对RNN模型训练的总结与回顾
+
+核心是模型，也就是针对于数据的一次计算，所以第一步应该是先将模型写下来
+
+RNN模型：
+$$
+f(X) = linear(X, state)
+$$
+然后，需要考虑的问题就是对模型的使用，到这个阶段需要针对模型的输入输出和循环三个角度考虑
+
+RNN 模型的输入包含两部分：
+
+1.   数据 X 
+2.   上一时间步的隐藏层 state
+
+数据部分：
+
+1.   获取文本数据
+2.   做数据处理模块，对数据进行处理
+     1.   对数据进行切分获取数据对应的 **vocab 和 词频**
+     2.   根据 vocab 做出数据的查询字典，包括根据数据索引对应 index，以及根据 index 索引数据的方法
+     3.   将数据切分成小批量，这里就需要超参 **batch_size**
+3.   将每一个词转换成 one_hot 向量
+
+最后得到的数据应该是：
+
+1.   数据对应的 **one_hot 向量 X**  
+2.   one_hot 向量的长度 **vocab_size**
+
+state：
+
+1.   初始 **state**
+     1.   创建 state 形状的 0 tensor
+2.   **state_new**
+     1.   Y, state_new = RNN(X, state)
+
+所以需要做的RNN模型类中应该包含
+
+1.   模型类初始化
+     1.   参数注入
+2.   forward 函数
+     1.   RNN 模型
+3.   state 初始化函数
+     1.   创建第一个 state 的方法
+
+目前已经将模型进行一定的设计，接着就需要考虑模型的训练
+
+模型训练就是循环，那首先就需要设置循环次数，也就是 **num_epochs**
+
+其次需要考虑一次循环中需要做的任务：
+
+1.   将数据 X 和 state 投入到模型中计算出 Y 和 state_new
+     1.   这里的 Y 只是模型输出，需要投入到输出层，计算出真正的输出 **output**
+     2.   output 是 one_hot 向量，如果是做预测，则需要将 one_hot 向量转换为数据，这时候需要调用 index 索引数据的方法，得到输出数据
+2.   计算 loss(output, Y_hat)
+     1.   这里的 Y_hat 是标签，output 是输出层的输出
+3.   计算 loss 梯度
+4.   梯度裁剪
+5.   参数优化
+
+我们训练的目的就是为了预测，预测就是将模型计算出来的 one_hot 向量 output拼接起来
+
+然后最后在根据索引方法转换为输出数据，本质上其实就是对数据的索引方法应用
+
+可以将预测放到训练中，对每一次的训练都打印预测结果
+
+### RNN的缺点
+
+无法处理长序列
+
+因为所有信息都放到隐藏状态，时间很长时候，隐藏状态中的信息就累积很多，那么很久之前的信息就会变得稀疏
