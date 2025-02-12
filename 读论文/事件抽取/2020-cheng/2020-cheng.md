@@ -1,0 +1,3 @@
+# Dynamically Updating Event Representations for Temporal Relation Classification with Multi-category Learning
+
+时间关系分类(TRC)是预测TLINK从源提到到目标提到的时间关系(后、前、包括等)的任务。在探索跨“本地”对和TLINK类别的共享信息方面付出的努力较少。近年来，人们提出了多种密集注释模式，以克服原始Timebank中的“稀疏”注释。一个典型的例子是时间银行密集(TD)语料库(Chambers et al.， 2014)，它用TLINKs的完整图对相邻的两个句子中的提及进行强制性密集标注。这样密集的注释增加了对共享共同事件的机会，以及跨TLINK类别对管理“全局”事件表示的需求。然而，全局地管理整个文档的事件表示对于密集的语料库来说是一个非常沉重的负担。Timebank- dense仅在36个文档中包含约10,000个tlink，密度是原始Timebank的7倍。因此，我们提出了一个**简化的场景，称为源事件中心TLINK (SECT)链**。对于文档中的每个事件ei，我们将包含公共源事件$e_i$的所有TLINK分组到以$e_i$为中心的TLINK链中，并按照文档中出现的目标提到的时间顺序排列它们。我们假设我们的系统能够通过一个“全局”循环神经网络(RNN)沿着SECT链学习中心事件$e_i$的动态表示。
